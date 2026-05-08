@@ -11,8 +11,10 @@ import com.yupi.template.rag.RetrievedChunk;
 import com.yupi.template.service.CourseDocumentChunkService;
 import com.yupi.template.service.CourseKnowledgeBaseService;
 import com.yupi.template.service.RagService;
+import com.yupi.template.service.VectorStoreService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -22,7 +24,7 @@ import java.util.stream.Collectors;
 
 /**
  * RAG 检索服务实现类
- * 第一版：基于关键词重叠度的文本相似度检索
+ * PGVector 向量检索 + 关键词相似度 fallback
  *
  * @author <a href="https://codefather.cn">编程导航学习圈</a>
  */
@@ -30,20 +32,10 @@ import java.util.stream.Collectors;
 @Slf4j
 public class RagServiceImpl implements RagService {
 
-    /**
-     * RAG 上下文最大字符数，防止 Prompt 过长
-     */
     private static final int MAX_CONTEXT_LENGTH = 4000;
-
-    /**
-     * topK 默认值
-     */
     private static final int DEFAULT_TOP_K = 5;
-
-    /**
-     * topK 最大值
-     */
     private static final int MAX_TOP_K = 10;
+    private static final int MAX_TOP_K_VECTOR = 20;
 
     @Resource
     private CourseKnowledgeBaseService courseKnowledgeBaseService;
@@ -53,6 +45,15 @@ public class RagServiceImpl implements RagService {
 
     @Resource
     private EmbeddingUtils embeddingUtils;
+
+    @Resource
+    private VectorStoreService vectorStoreService;
+
+    @Value("${rag.vector.enabled:true}")
+    private boolean vectorEnabled;
+
+    @Value("${rag.vector.fallback-enabled:true}")
+    private boolean fallbackEnabled;
 
     @Override
     public List<RetrievedChunk> retrieve(String kbId, String query, Integer topK, User loginUser) {
@@ -65,7 +66,8 @@ public class RagServiceImpl implements RagService {
         if (topK == null || topK <= 0) {
             topK = DEFAULT_TOP_K;
         }
-        topK = Math.min(topK, MAX_TOP_K);
+        int maxK = vectorEnabled ? MAX_TOP_K_VECTOR : MAX_TOP_K;
+        topK = Math.min(topK, maxK);
 
         // 3. 校验知识库存在且属于当前用户
         QueryWrapper kbQuery = QueryWrapper.create().eq("kbId", kbId);
@@ -74,43 +76,41 @@ public class RagServiceImpl implements RagService {
         ThrowUtils.throwIf(!kb.getUserId().equals(loginUser.getId()),
                 ErrorCode.NO_AUTH_ERROR, "无权检索该知识库");
 
-        // 4. 查询该知识库下所有切片（isDelete 由 MyBatis-Flex 逻辑删除自动过滤）
-        QueryWrapper chunkQuery = QueryWrapper.create().eq("kbId", kbId);
-        List<CourseDocumentChunk> allChunks = courseDocumentChunkService.list(chunkQuery);
+        // 4. 尝试 PGVector 向量检索
+        if (vectorEnabled) {
+            try {
+                List<Double> queryEmbedding = embeddingUtils.embed(query);
+                if (queryEmbedding != null && !queryEmbedding.isEmpty()) {
+                    List<RetrievedChunk> vectorResults =
+                            vectorStoreService.search(loginUser.getId(), kbId,
+                                    queryEmbedding, topK);
 
-        // 5. 无切片时直接返回空
-        if (allChunks == null || allChunks.isEmpty()) {
-            log.info("知识库无可用切片, kbId={}", kbId);
-            return List.of();
-        }
+                    if (vectorResults != null && !vectorResults.isEmpty()) {
+                        log.info("PGVector 检索命中, kbId={}, query={}, topK={}, resultCount={}",
+                                kbId, queryPreview(query), topK, vectorResults.size());
+                        return vectorResults;
+                    }
 
-        // 6. 计算每个 chunk 与 query 的相似度
-        List<RetrievedChunk> scoredChunks = new ArrayList<>();
-        for (CourseDocumentChunk chunk : allChunks) {
-            double score = embeddingUtils.calculateTextSimilarity(query, chunk.getContent());
-            if (score > 0 || allChunks.size() <= topK) {
-                // 保留所有 score > 0 的结果；如果总分片数 <= topK，也保留 score=0 的兜底
-                RetrievedChunk rc = new RetrievedChunk();
-                rc.setId(chunk.getId());
-                rc.setChunkId(chunk.getChunkId());
-                rc.setDocId(chunk.getDocId());
-                rc.setKbId(chunk.getKbId());
-                rc.setChunkIndex(chunk.getChunkIndex());
-                rc.setContent(chunk.getContent());
-                rc.setScore(score);
-                scoredChunks.add(rc);
+                    log.info("PGVector 检索返回空, kbId={}, query={}, 将使用 fallback",
+                            kbId, queryPreview(query));
+                } else {
+                    log.warn("Query embedding 生成返回 null, kbId={}, query={}",
+                            kbId, queryPreview(query));
+                }
+            } catch (Exception e) {
+                log.warn("PGVector 检索异常, kbId={}, query={}, 降级到关键词检索",
+                        kbId, queryPreview(query), e);
+            }
+
+            if (!fallbackEnabled) {
+                return List.of();
             }
         }
 
-        // 7. 按 score 降序排序，取 topK
-        List<RetrievedChunk> result = scoredChunks.stream()
-                .sorted(Comparator.comparingDouble(RetrievedChunk::getScore).reversed())
-                .limit(topK)
-                .collect(Collectors.toList());
-
-        log.info("RAG 检索完成, kbId={}, query={}, topK={}, totalChunks={}, resultCount={}",
-                kbId, query.substring(0, Math.min(50, query.length())), topK, allChunks.size(), result.size());
-        return result;
+        // 5. Fallback: 旧关键词相似度检索
+        log.info("使用关键词 fallback 检索, kbId={}, query={}, topK={}",
+                kbId, queryPreview(query), topK);
+        return retrieveByKeywordFallback(kbId, query, topK);
     }
 
     @Override
@@ -158,6 +158,46 @@ public class RagServiceImpl implements RagService {
         log.info("RAG 上下文构造完成, kbId={}, chunkCount={}, contextLength={}",
                 kbId, includedCount, ragContext.length());
         return ragContext;
+    }
+
+    /**
+     * 基于关键词相似度的检索（旧逻辑）
+     * 仅在 PGVector 不可用时作为降级方案
+     */
+    private List<RetrievedChunk> retrieveByKeywordFallback(String kbId, String query,
+                                                            Integer topK) {
+        QueryWrapper chunkQuery = QueryWrapper.create().eq("kbId", kbId);
+        List<CourseDocumentChunk> allChunks = courseDocumentChunkService.list(chunkQuery);
+
+        if (allChunks == null || allChunks.isEmpty()) {
+            log.info("知识库无可用切片, kbId={}", kbId);
+            return List.of();
+        }
+
+        List<RetrievedChunk> scoredChunks = new ArrayList<>();
+        for (CourseDocumentChunk chunk : allChunks) {
+            double score = embeddingUtils.calculateTextSimilarity(query, chunk.getContent());
+            if (score > 0 || allChunks.size() <= topK) {
+                RetrievedChunk rc = new RetrievedChunk();
+                rc.setId(chunk.getId());
+                rc.setChunkId(chunk.getChunkId());
+                rc.setDocId(chunk.getDocId());
+                rc.setKbId(chunk.getKbId());
+                rc.setChunkIndex(chunk.getChunkIndex());
+                rc.setContent(chunk.getContent());
+                rc.setScore(score);
+                scoredChunks.add(rc);
+            }
+        }
+
+        return scoredChunks.stream()
+                .sorted(Comparator.comparingDouble(RetrievedChunk::getScore).reversed())
+                .limit(topK)
+                .collect(Collectors.toList());
+    }
+
+    private String queryPreview(String query) {
+        return query.substring(0, Math.min(50, query.length()));
     }
 
     @Override

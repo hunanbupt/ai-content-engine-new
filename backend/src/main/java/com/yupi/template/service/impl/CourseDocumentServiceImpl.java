@@ -14,9 +14,11 @@ import com.yupi.template.model.enums.DocumentParseStatusEnum;
 import com.yupi.template.model.vo.CourseDocumentVO;
 import com.yupi.template.rag.DocumentChunker;
 import com.yupi.template.rag.DocumentParser;
+import com.yupi.template.rag.EmbeddingUtils;
 import com.yupi.template.service.CourseDocumentChunkService;
 import com.yupi.template.service.CourseDocumentService;
 import com.yupi.template.service.CourseKnowledgeBaseService;
+import com.yupi.template.service.VectorStoreService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -59,6 +61,12 @@ public class CourseDocumentServiceImpl extends ServiceImpl<CourseDocumentMapper,
 
     @Resource
     private DocumentChunker documentChunker;
+
+    @Resource
+    private EmbeddingUtils embeddingUtils;
+
+    @Resource
+    private VectorStoreService vectorStoreService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -110,6 +118,30 @@ public class CourseDocumentServiceImpl extends ServiceImpl<CourseDocumentMapper,
                 chunkEntities.add(chunk);
             }
             courseDocumentChunkService.saveBatch(chunkEntities);
+
+            // 8.5 为切片生成 embedding 并写入 PGVector（单个失败不影响上传）
+            for (CourseDocumentChunk chunk : chunkEntities) {
+                try {
+                    List<Double> embedding = embeddingUtils.embed(chunk.getContent());
+                    if (embedding != null && !embedding.isEmpty()) {
+                        vectorStoreService.upsertChunkEmbedding(
+                            loginUser.getId(),
+                            kbId,
+                            docId,
+                            chunk.getChunkId(),
+                            chunk.getContent(),
+                            embedding,
+                            "text-embedding-v4"
+                        );
+                    } else {
+                        log.warn("Chunk embedding 生成返回空, chunkId={}, docId={}",
+                                chunk.getChunkId(), docId);
+                    }
+                } catch (Exception e) {
+                    log.error("Chunk embedding 写入 PGVector 失败, chunkId={}, docId={}",
+                            chunk.getChunkId(), docId, e);
+                }
+            }
 
             // 9. 更新文档状态为成功
             document.setParseStatus(DocumentParseStatusEnum.SUCCESS.getValue());

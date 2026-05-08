@@ -1,16 +1,19 @@
 package com.yupi.template.rag;
 
+import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.stereotype.Component;
 
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Embedding / 文本相似度工具类
- * 第一版使用关键词重叠度计算文本相关度
- * 后续可替换为 DashScope Embedding + 余弦相似度
- *
+ * 关键词相似度（fallback）+ DashScope Embedding（主力）
  */
 @Component
 @Slf4j
@@ -114,12 +117,63 @@ public class EmbeddingUtils {
         return Character.UnicodeScript.of(ch) == Character.UnicodeScript.HAN;
     }
 
-    // TODO: 后续版本替换为 DashScope Embedding API
-    // public List<Float> embed(String text) {
-    //     // 调用 DashScope Embedding API 获取向量
-    // }
-    //
-    // public double cosineSimilarity(List<Float> vec1, List<Float> vec2) {
-    //     // 计算余弦相似度
-    // }
+    // ========== 新增：DashScope Embedding API ==========
+
+    @Resource
+    private EmbeddingModel embeddingModel;
+
+    /** 本地缓存：text -> embedding，避免重复调用 API */
+    private final Map<String, List<Double>> embeddingCache = new ConcurrentHashMap<>();
+
+    /** 单次 embedding 最大文本长度 */
+    private static final int MAX_TEXT_LENGTH = 3000;
+
+    /**
+     * 调用 DashScope Embedding API 生成文本向量
+     *
+     * @param text 输入文本
+     * @return embedding 向量（1024维），失败返回 null
+     */
+    public List<Double> embed(String text) {
+        if (text == null || text.trim().isEmpty()) {
+            return null;
+        }
+
+        String truncated = text.length() > MAX_TEXT_LENGTH
+                ? text.substring(0, MAX_TEXT_LENGTH) : text;
+
+        String cacheKey = truncated.trim();
+        List<Double> cached = embeddingCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
+        try {
+            long start = System.currentTimeMillis();
+            List<Double> embedding = embeddingModel.embed(truncated);
+            long elapsed = System.currentTimeMillis() - start;
+
+            if (embedding != null && !embedding.isEmpty()) {
+                embeddingCache.put(cacheKey, embedding);
+                log.info("Embedding 生成成功, textLength={}, dim={}, elapsedMs={}",
+                        truncated.length(), embedding.size(), elapsed);
+                return embedding;
+            }
+
+            log.warn("Embedding 返回空, textLength={}, elapsedMs={}", truncated.length(), elapsed);
+            return null;
+
+        } catch (Exception e) {
+            log.error("Embedding 生成失败, textLength={}", truncated.length(), e);
+            return null;
+        }
+    }
+
+    /**
+     * 清空 embedding 缓存（模型切换时调用）
+     */
+    public void clearCache() {
+        embeddingCache.clear();
+        log.info("Embedding 缓存已清空");
+    }
 }
