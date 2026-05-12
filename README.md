@@ -16,6 +16,7 @@ mvn spring-boot:run
 ```bash
 cd frontend
 npm run dev
+把前面的去了
 ```
 
 前端页面：http://localhost:5173
