@@ -1,6 +1,6 @@
 package com.yupi.template;
 
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
+import org.springframework.ai.chat.model.ChatModel;
 import jakarta.annotation.Resource;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -21,7 +21,7 @@ import reactor.core.publisher.Flux;
 public class MainApplicationTests {
 
     @Resource
-    private DashScopeChatModel chatModel;
+    private ChatModel chatModel;
 
     @Test
     public void testChat() {

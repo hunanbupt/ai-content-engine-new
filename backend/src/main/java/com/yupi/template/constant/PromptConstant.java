@@ -173,7 +173,7 @@ public interface PromptConstant {
                - 注意：position=1 的封面图不需要占位符，不要放在正文中
                - 其他配图占位符可以放在任意合适位置（章节标题后、段落之间、列表项中、文字行内等）
             4. **imageSource 字段必须且只能是上述可用配图方式之一，不要使用其他值**
-            5. placeholderId 必须与正文中插入的占位符完全一致
+            5. **【关键】imageRequirements 中的 placeholderId 必须与 contentWithPlaceholders 中实际插入的占位符一一对应，不能有遗漏或多出**
             6. position=1 为封面图
             
             请直接返回 JSON 格式,不要有其他内容:

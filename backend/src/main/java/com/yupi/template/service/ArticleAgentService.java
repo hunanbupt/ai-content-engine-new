@@ -1,6 +1,6 @@
 package com.yupi.template.service;
 
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
+import org.springframework.ai.chat.model.ChatModel;
 import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
 import com.yupi.template.annotation.AgentExecution;
@@ -34,7 +34,7 @@ import java.util.function.Consumer;
 public class ArticleAgentService {
 
     @Resource
-    private DashScopeChatModel chatModel;
+    private ChatModel chatModel;
 
     @Resource
     private ImageServiceStrategy imageServiceStrategy;

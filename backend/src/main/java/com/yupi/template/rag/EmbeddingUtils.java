@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -150,10 +151,14 @@ public class EmbeddingUtils {
 
         try {
             long start = System.currentTimeMillis();
-            List<Double> embedding = embeddingModel.embed(truncated);
+            float[] embeddingArray = embeddingModel.embed(truncated);
             long elapsed = System.currentTimeMillis() - start;
 
-            if (embedding != null && !embedding.isEmpty()) {
+            if (embeddingArray != null && embeddingArray.length > 0) {
+                List<Double> embedding = new ArrayList<>(embeddingArray.length);
+                for (float v : embeddingArray) {
+                    embedding.add((double) v);
+                }
                 embeddingCache.put(cacheKey, embedding);
                 log.info("Embedding 生成成功, textLength={}, dim={}, elapsedMs={}",
                         truncated.length(), embedding.size(), elapsed);
